@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "TruTranslate",
+  "version": "0.1.0",
+  "description": "Sunucusuz, cihaz üzerinde çalışan sayfa çevirmeni (Tencent Hy-MT2 1.8B). Hiçbir veri cihazdan çıkmaz.",
+  "permissions": ["offscreen", "storage", "tabs", "scripting"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_popup": "popup.html", "default_title": "TruTranslate" },
+  "content_scripts": [
+    { "matches": ["<all_urls>"], "js": ["content.js"], "run_at": "document_idle" }
+  ]
+}

@@ -1,0 +1,8 @@
+local.properties
+*.keystore
+*.apk
+.gradle/
+build/
+.cxx/
+*.gguf
+node_modules/
