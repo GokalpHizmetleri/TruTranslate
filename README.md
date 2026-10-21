@@ -64,3 +64,9 @@ TruTranslate hiçbir analitik, hesap veya arka uç servisi içermez. Çevrilen m
 ## Lisans
 
 Bu proje Apache 2.0 altındadır. Kullandığı Hy-MT2-1.8B modeli de Apache 2.0 lisanslıdır (Tencent).
+
+## v1.1.0 — Gömülü Model Sürümleri
+
+- **Android APK (v1.1.0):** Model APK'nın içinde (~1,14 GB) — kurulumdan sonra internet gerekmez. İlk açılışta model dahili depolamaya ayıklanır (~2,3 GB boş alan gerekir).
+- **Chrome Uzantısı FULL (`trutranslate-extension-full.zip`, ~1,14 GB):** Model zip'in içinde; ilk açılışta indirme olmaz. Not: tarayıcı modeli ayrıca kendi önbelleğine (OPFS) kopyalar, bu yüzden diskte ~2,3 GB yer kaplar. Hafif sürüm (`trutranslate-extension.zip`, 2,6 MB) modeli ilk kullanımda HuggingFace'den indirir — ikisi de aynı çeviriyi yapar.
+- Arayüz yenilendi: Material tarzı kart tasarımı, koyu/aydınlık mod, dil değiştirme (⇄), kopyala/paylaş/dinle düğmeleri, mikrofonla giriş, çeviri geçmişi.

@@ -1,33 +1,56 @@
 package com.trutranslate.app
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
+import android.text.Editable
+import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.widget.*
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.*
+import org.json.JSONArray
+import org.json.JSONObject
 import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
     private val scope = MainScope()
     private var tts: TextToSpeech? = null
     private var recognizer: SpeechRecognizer? = null
-    private lateinit var status: TextView
-    private lateinit var progress: ProgressBar
+    private var modelReady = false
+    private var translating = false
+    private var pendingTranslate: Job? = null
+
+    private lateinit var root: LinearLayout
+    private lateinit var srcBtn: TextView
+    private lateinit var dstBtn: TextView
     private lateinit var input: EditText
     private lateinit var output: TextView
-    private lateinit var srcSpin: Spinner
-    private lateinit var dstSpin: Spinner
-    private var translating = false
+    private lateinit var statusLine: TextView
+    private lateinit var progressBar: ProgressBar
+    private lateinit var micBtn: TextView
+    private lateinit var speakBtn: TextView
+    private lateinit var historyBox: LinearLayout
+    private lateinit var historySection: LinearLayout
+
+    private var srcIdx = 0
+    private var dstIdx = 1
 
     private val langs = listOf(
         "tr" to "Türkçe", "en" to "English", "de" to "Deutsch", "fr" to "Français", "es" to "Español",
@@ -49,114 +72,321 @@ class MainActivity : AppCompatActivity() {
         "id" to "Indonesian", "tl" to "Filipino", "km" to "Khmer", "my" to "Burmese", "bo" to "Tibetan",
         "kk" to "Kazakh", "mn" to "Mongolian", "ug" to "Uyghur", "yue" to "Cantonese"
     )
+    private val locales = mapOf(
+        "tr" to "tr-TR", "en" to "en-US", "de" to "de-DE", "fr" to "fr-FR", "es" to "es-ES",
+        "pt" to "pt-PT", "it" to "it-IT", "nl" to "nl-NL", "pl" to "pl-PL", "cs" to "cs-CZ",
+        "ru" to "ru-RU", "uk" to "uk-UA", "ar" to "ar-SA", "hi" to "hi-IN", "zh" to "zh-CN",
+        "ja" to "ja-JP", "ko" to "ko-KR", "th" to "th-TH", "vi" to "vi-VN", "id" to "id-ID"
+    )
+
+    private val accent = Color.parseColor("#1A73E8")
+    private fun isNight() = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
+    private fun bgColor() = if (isNight()) Color.parseColor("#121316") else Color.parseColor("#F1F3F4")
+    private fun cardColor() = if (isNight()) Color.parseColor("#1E1F22") else Color.WHITE
+    private fun textColor() = if (isNight()) Color.parseColor("#E8EAED") else Color.parseColor("#202124")
+    private fun subTextColor() = if (isNight()) Color.parseColor("#9AA0A6") else Color.parseColor("#5F6368")
+
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+    private fun card(): GradientDrawable = GradientDrawable().apply {
+        setColor(cardColor()); cornerRadius = dp(16).toFloat()
+        if (!isNight()) setStroke(dp(1), Color.parseColor("#E0E0E0"))
+    }
+    private fun pill(filled: Boolean): GradientDrawable = GradientDrawable().apply {
+        cornerRadius = dp(20).toFloat()
+        if (filled) setColor(accent) else { setColor(Color.TRANSPARENT); setStroke(dp(1), subTextColor()) }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(32, 32, 32, 32)
-        }
-        val title = TextView(this).apply { text = "TruTranslate"; textSize = 24f; setPadding(0,0,0,4) }
-        val sub = TextView(this).apply { text = "%100 cihazda çeviri - sunucu yok, hesap yok"; textSize = 12f; setPadding(0,0,0,16) }
-        val spinRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        srcSpin = Spinner(this); dstSpin = Spinner(this)
-        val srcItems = listOf("Otomatik") + langs.map { it.second }
-        srcSpin.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, srcItems)
-        dstSpin.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, langs.map { it.second })
-        spinRow.addView(srcSpin, LinearLayout.LayoutParams(0, -2, 1f))
-        spinRow.addView(dstSpin, LinearLayout.LayoutParams(0, -2, 1f))
-        input = EditText(this).apply { hint = "Çevrilecek metni yaz veya mikrofona konuş"; minLines = 3; gravity = Gravity.TOP }
-        val btnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val micBtn = Button(this).apply { text = "🎤 Konuş" }
-        val goBtn = Button(this).apply { text = "Çevir" }
-        btnRow.addView(micBtn, LinearLayout.LayoutParams(0, -2, 1f))
-        btnRow.addView(goBtn, LinearLayout.LayoutParams(0, -2, 1f))
-        output = TextView(this).apply { textSize = 18f; setPadding(0,16,0,16); setTextIsSelectable(true) }
-        val speakBtn = Button(this).apply { text = "🔊 Dinle" }
-        progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 100; visibility = View.GONE }
-        status = TextView(this).apply { textSize = 12f }
-        root.addView(title); root.addView(sub); root.addView(spinRow); root.addView(input)
-        root.addView(btnRow); root.addView(output); root.addView(speakBtn); root.addView(progress); root.addView(status)
-        setContentView(ScrollView(this).apply { addView(root) })
-
+        buildUi()
         tts = TextToSpeech(this) { }
-        goBtn.setOnClickListener { doTranslate() }
-        speakBtn.setOnClickListener {
-            val code = langs.getOrNull(dstSpin.selectedItemPosition)?.first ?: "tr"
-            tts?.language = Locale.forLanguageTag(code)
-            tts?.speak(output.text.toString(), TextToSpeech.QUEUE_FLUSH, null, "tt")
-        }
-        micBtn.setOnClickListener { startListening() }
-        ensureModel()
+        prepareModel()
     }
 
-    private fun ensureModel() {
-        if (ModelDownloader.isReady(this)) { loadNative(); return }
-        status.text = "Model bir kere iniyor (~1,1 GB)..."
-        progress.visibility = View.VISIBLE
-        scope.launch {
-            val ok = ModelDownloader.download(this@MainActivity) { d, t ->
-                runOnUiThread {
-                    val pct = if (t > 0) (d * 100 / t).toInt() else 0
-                    progress.progress = pct
-                    status.text = "Model iniyor: %$pct (${d/1048576} MB / ${t/1048576} MB) - bir kere iner"
+    private fun buildUi() {
+        val scroll = ScrollView(this)
+        root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(bgColor())
+            setPadding(dp(16), dp(24), dp(16), dp(24))
+        }
+        scroll.addView(root)
+        setContentView(scroll)
+
+        // Başlık
+        root.addView(TextView(this).apply {
+            text = "TruTranslate"; textSize = 22f; setTextColor(textColor())
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setPadding(dp(4), 0, 0, dp(16))
+        })
+
+        // Dil çubuğu: [Kaynak] [⇄] [Hedef]
+        val langBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            background = card(); setPadding(dp(8), dp(8), dp(8), dp(8))
+        }
+        fun langButton(): TextView = TextView(this).apply {
+            textSize = 15f; setTextColor(accent); gravity = Gravity.CENTER
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            layoutParams = LinearLayout.LayoutParams(0, dp(44), 1f)
+        }
+        srcBtn = langButton().apply { text = langs[srcIdx].second; setOnClickListener { pickLanguage(true) } }
+        dstBtn = langButton().apply { text = langs[dstIdx].second; setOnClickListener { pickLanguage(false) } }
+        val swap = TextView(this).apply {
+            text = "⇄"; textSize = 20f; setTextColor(subTextColor()); gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(dp(48), dp(44))
+            setOnClickListener {
+                if (!modelReady) return@setOnClickListener
+                val t = srcIdx; srcIdx = dstIdx; dstIdx = t
+                srcBtn.text = langs[srcIdx].second; dstBtn.text = langs[dstIdx].second
+                val it = input.text.toString(); input.setText(output.text.toString()); output.text = it
+                scheduleTranslate()
+            }
+        }
+        langBar.addView(srcBtn); langBar.addView(swap); langBar.addView(dstBtn)
+        root.addView(langBar)
+
+        // Giriş kartı
+        val inCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; background = card()
+            setPadding(dp(16), dp(12), dp(8), dp(8))
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(12) }
+        }
+        input = EditText(this).apply {
+            hint = "Çevrilecek metni yazın"; textSize = 18f
+            setTextColor(textColor()); setHintTextColor(subTextColor())
+            background = null; minLines = 3; gravity = Gravity.TOP
+            addTextChangedListener(object : TextWatcher {
+                override fun afterTextChanged(s: Editable?) { scheduleTranslate() }
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
+            })
+        }
+        inCard.addView(input)
+        val inRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL or Gravity.END }
+        micBtn = actionButton("🎤", "Konuş") { startListening() }
+        val clearBtn = actionButton("✕", "Temizle") { input.setText(""); output.text = "" }
+        inRow.addView(clearBtn); inRow.addView(micBtn)
+        inCard.addView(inRow)
+        root.addView(inCard)
+
+        // Çıkış kartı
+        val outCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; background = card()
+            setPadding(dp(16), dp(12), dp(8), dp(8))
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(12) }
+        }
+        outCard.addView(TextView(this).apply {
+            text = langs[dstIdx].second; textSize = 13f; setTextColor(accent)
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            tag = "outLabel"
+        })
+        output = TextView(this).apply {
+            textSize = 18f; setTextColor(textColor()); minLines = 3
+            setPadding(0, dp(4), 0, dp(4))
+            setTextIsSelectable(true)
+        }
+        outCard.addView(output)
+        val outRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        val copyBtn = actionButton("⧉", "Kopyala") {
+            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            cm.setPrimaryClip(ClipData.newPlainText("çeviri", output.text.toString()))
+            toast("Kopyalandı")
+        }
+        val shareBtn = actionButton("↗", "Paylaş") {
+            val i = Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, output.text.toString()) }
+            startActivity(Intent.createChooser(i, "Çeviriyi paylaş"))
+        }
+        speakBtn = actionButton("🔊", "Dinle") { speakOutput() }
+        outRow.addView(copyBtn); outRow.addView(shareBtn); outRow.addView(speakBtn)
+        outCard.addView(outRow)
+        root.addView(outCard)
+
+        // Durum + ilerleme
+        statusLine = TextView(this).apply { textSize = 13f; setTextColor(subTextColor()); setPadding(dp(4), dp(12), 0, 0) }
+        root.addView(statusLine)
+        progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100; visibility = View.GONE
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(6)).apply { topMargin = dp(6) }
+        }
+        root.addView(progressBar)
+
+        // Geçmiş
+        historySection = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(historySection)
+        renderHistory()
+    }
+
+    private fun actionButton(icon: String, label: String, onClick: () -> Unit): TextView =
+        TextView(this).apply {
+            text = "$icon  $label"; textSize = 13f; setTextColor(accent)
+            gravity = Gravity.CENTER; setPadding(dp(12), 0, dp(12), 0)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40))
+            setOnClickListener { onClick() }
+        }
+
+    private fun pickLanguage(isSrc: Boolean) {
+        val items = langs.map { it.second }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle(if (isSrc) "Kaynak dil" else "Hedef dil")
+            .setItems(items) { _, which ->
+                if (isSrc) { srcIdx = which; srcBtn.text = langs[which].second }
+                else { dstIdx = which; dstBtn.text = langs[which].second; historySection.findViewWithTag<TextView>("outLabel")?.text = langs[which].second }
+                scheduleTranslate()
+            }.show()
+    }
+
+    private fun prepareModel() {
+        statusLine.text = "Model hazırlanıyor…"
+        progressBar.visibility = View.VISIBLE
+        scope.launch(Dispatchers.IO) {
+            try {
+                if (!ModelManager.isReady(this@MainActivity)) {
+                    withContext(Dispatchers.Main) { statusLine.text = "Model ilk kez ayıklanıyor (bir kez, ~1,1 GB)…" }
+                    ModelManager.extract(this@MainActivity) { p ->
+                        scope.launch(Dispatchers.Main) { progressBar.progress = p }
+                    }
+                }
+                val ok = LlamaBridge.loadModel(ModelManager.modelFile(this@MainActivity).absolutePath)
+                withContext(Dispatchers.Main) {
+                    progressBar.visibility = View.GONE
+                    if (ok) { modelReady = true; statusLine.text = "Hazır — çeviri cihazınızda, çevrimdışı çalışır." }
+                    else statusLine.text = "Model yüklenemedi. Uygulamayı yeniden başlatın."
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    progressBar.visibility = View.GONE
+                    statusLine.text = e.message ?: "Model hazırlanamadı."
                 }
             }
-            runOnUiThread { progress.visibility = View.GONE }
-            if (ok) loadNative() else runOnUiThread { status.text = "Model indirilemedi. İnterneti kontrol edip uygulamayı yeniden aç." }
         }
     }
 
-    private fun loadNative() {
-        scope.launch(Dispatchers.Default) {
-            runOnUiThread { status.text = "Model yükleniyor..." }
-            val ok = LlamaBridge.loadModel(ModelDownloader.modelFile(this@MainActivity).absolutePath)
-            runOnUiThread { status.text = if (ok) "Hazır ✓ (çeviri tamamen bu cihazda)" else "Model yüklenemedi" }
-        }
-    }
-
-    private fun doTranslate() {
-        if (translating) return
+    private fun scheduleTranslate() {
+        pendingTranslate?.cancel()
         val text = input.text.toString().trim()
-        if (text.isEmpty()) return
-        if (!LlamaBridge.isLoaded()) { status.text = "Model henüz hazır değil"; return }
-        val code = langs.getOrNull(dstSpin.selectedItemPosition)?.first ?: "tr"
-        val target = langNamesEn[code] ?: "Turkish"
-        translating = true
-        status.text = "Çevriliyor..."
-        scope.launch(Dispatchers.Default) {
-            val res = try { LlamaBridge.translate(text, target) } catch (e: Exception) { "Hata: ${e.message}" }
-            runOnUiThread { output.text = res; status.text = "Hazır ✓"; translating = false }
+        if (text.isEmpty()) { output.text = ""; return }
+        if (!modelReady || translating) return
+        pendingTranslate = scope.launch {
+            delay(600)
+            doTranslate(text)
         }
+    }
+
+    private suspend fun doTranslate(text: String) {
+        translating = true
+        withContext(Dispatchers.Main) { statusLine.text = "Çevriliyor…" }
+        val result = withContext(Dispatchers.IO) {
+            try { LlamaBridge.translate(text, langNamesEn[langs[dstIdx].first] ?: "English") }
+            catch (e: Exception) { "Hata: ${e.message}" }
+        }
+        translating = false
+        output.text = result
+        statusLine.text = "Hazır — çeviri cihazınızda, çevrimdışı çalışır."
+        addHistory(text, result)
+        // Bekleyen yeni metin varsa çevir
+        val now = input.text.toString().trim()
+        if (now.isNotEmpty() && now != text) scheduleTranslate()
+    }
+
+    private fun speakOutput() {
+        val text = output.text.toString()
+        if (text.isEmpty()) return
+        val loc = locales[langs[dstIdx].first]?.let { Locale.forLanguageTag(it) } ?: Locale.ENGLISH
+        tts?.language = loc
+        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "tts1")
     }
 
     private fun startListening() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 1); return
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 7)
+            return
         }
-        val code = langs.getOrNull((srcSpin.selectedItemPosition - 1).coerceAtLeast(0))?.first ?: "tr"
-        if (recognizer == null) recognizer = SpeechRecognizer.createSpeechRecognizer(this)
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) { toast("Bu cihazda konuşma tanıma yok."); return }
+        recognizer?.destroy()
+        recognizer = SpeechRecognizer.createSpeechRecognizer(this).apply {
+            setRecognitionListener(object : RecognitionListener {
+                override fun onResults(results: Bundle) {
+                    val matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    if (!matches.isNullOrEmpty()) input.setText(matches[0])
+                }
+                override fun onError(error: Int) { statusLine.text = "Sesli giriş durdu." }
+                override fun onReadyForSpeech(params: Bundle?) { statusLine.text = "Dinleniyor…" }
+                override fun onBeginningOfSpeech() {}
+                override fun onRmsChanged(rmsdB: Float) {}
+                override fun onBufferReceived(buffer: ByteArray?) {}
+                override fun onEndOfSpeech() { statusLine.text = "İşleniyor…" }
+                override fun onPartialResults(partialResults: Bundle?) {}
+                override fun onEvent(eventType: Int, params: Bundle?) {}
+            })
+        }
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, code)
-            putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, locales[langs[srcIdx].first] ?: "tr-TR")
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "Konuşun…")
         }
-        recognizer?.setRecognitionListener(object : RecognitionListener {
-            override fun onResults(results: Bundle?) {
-                val texts = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                if (!texts.isNullOrEmpty()) { input.setText(texts[0]); doTranslate() }
-            }
-            override fun onError(error: Int) { status.text = "Ses tanıma hatası: $error" }
-            override fun onReadyForSpeech(params: Bundle?) { status.text = "Dinliyorum..." }
-            override fun onBeginningOfSpeech() {}
-            override fun onRmsChanged(rmsdB: Float) {}
-            override fun onBufferReceived(buffer: ByteArray?) {}
-            override fun onEndOfSpeech() {}
-            override fun onPartialResults(partialResults: Bundle?) {}
-            override fun onEvent(eventType: Int, params: Bundle?) {}
-        })
         recognizer?.startListening(intent)
     }
 
-    override fun onDestroy() { scope.cancel(); recognizer?.destroy(); tts?.shutdown(); super.onDestroy() }
+    // ---- Geçmiş ----
+    private fun historyStore() = getSharedPreferences("history", Context.MODE_PRIVATE)
+
+    private fun addHistory(src: String, dst: String) {
+        if (dst.startsWith("Hata:")) return
+        val arr = JSONArray(historyStore().getString("items", "[]"))
+        val o = JSONObject().apply {
+            put("src", src); put("dst", dst)
+            put("sl", langs[srcIdx].second); put("dl", langs[dstIdx].second)
+        }
+        val na = JSONArray(); na.put(o)
+        for (i in 0 until minOf(arr.length(), 49)) na.put(arr.get(i))
+        historyStore().edit().putString("items", na.toString()).apply()
+        renderHistory()
+    }
+
+    private fun renderHistory() {
+        historySection.removeAllViews()
+        val arr = JSONArray(historyStore().getString("items", "[]"))
+        if (arr.length() == 0) return
+        historySection.addView(TextView(this).apply {
+            text = "Geçmiş"; textSize = 15f; setTextColor(textColor())
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setPadding(dp(4), dp(20), 0, dp(8))
+        })
+        historyBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        for (i in 0 until minOf(arr.length(), 10)) {
+            val o = arr.getJSONObject(i)
+            val item = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL; background = card()
+                setPadding(dp(16), dp(10), dp(16), dp(10))
+                layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(8) }
+                setOnClickListener {
+                    input.setText(o.getString("src")); output.text = o.getString("dst")
+                }
+            }
+            item.addView(TextView(this).apply {
+                text = "${o.getString("sl")} → ${o.getString("dl")}"; textSize = 11f; setTextColor(accent)
+            })
+            item.addView(TextView(this).apply {
+                text = o.getString("src").take(90); textSize = 14f; setTextColor(textColor())
+            })
+            item.addView(TextView(this).apply {
+                text = o.getString("dst").take(90); textSize = 14f; setTextColor(subTextColor())
+            })
+            historyBox.addView(item)
+        }
+        historySection.addView(historyBox)
+    }
+
+    private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 7 && grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) startListening()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        scope.cancel(); recognizer?.destroy(); tts?.shutdown()
+    }
 }
