@@ -236,9 +236,49 @@ class MainActivity : AppCompatActivity() {
             }.show()
     }
 
+    // ---- Model yükleme: çökme korumalı ----
+    // loadModel native çağrısı çökerse (SIGILL/OOM) uygulama anında kapanır.
+    // Yüklemeden ÖNCE bayrak yazılır; başarıda silinir. Açılışta bayrak varsa
+    // önceki deneme çöktü demektir → otomatik yükleme yapma, hata ekranı göster.
+    private fun loadPrefs() = getSharedPreferences("model_state", Context.MODE_PRIVATE)
+
+    private fun deviceProfile(): Triple<Int, Int, String?> {
+        val am = getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+        val mi = android.app.ActivityManager.MemoryInfo()
+        am.getMemoryInfo(mi)
+        val totalGb = mi.totalMem / (1024.0 * 1024.0 * 1024.0)
+        val availGb = mi.availMem / (1024.0 * 1024.0 * 1024.0)
+        val cores = Runtime.getRuntime().availableProcessors()
+        val threads = when {
+            totalGb < 3.5 -> minOf(2, cores)
+            totalGb < 6.0 -> minOf(3, cores)
+            else -> minOf(4, cores)
+        }
+        val ctx = when {
+            totalGb < 3.5 -> 512
+            totalGb < 6.0 -> 768
+            else -> 1024
+        }
+        val warn = if (availGb < 1.2) "Boş RAM çok az (%.1f GB). Diğer uygulamaları kapatıp tekrar deneyin.".format(availGb) else null
+        return Triple(ctx, threads, warn)
+    }
+
     private fun prepareModel() {
+        val prefs = loadPrefs()
+        if (prefs.getString("load_state", null) == "loading") {
+            // Önceki yükleme denemesi çöktü → döngüye girme
+            showModelError("Model önceki açılışta yüklenirken uygulama kapandı. " +
+                "Aşağıdaki seçeneklerden birini deneyin.")
+            return
+        }
+        startModelLoad()
+    }
+
+    private fun startModelLoad() {
+        val prefs = loadPrefs()
         statusLine.text = "Model hazırlanıyor…"
         progressBar.visibility = View.VISIBLE
+        val (nCtx, nThreads, memWarn) = deviceProfile()
         scope.launch(Dispatchers.IO) {
             try {
                 if (!ModelManager.isReady(this@MainActivity)) {
@@ -247,19 +287,73 @@ class MainActivity : AppCompatActivity() {
                         scope.launch(Dispatchers.Main) { progressBar.progress = p }
                     }
                 }
-                val ok = LlamaBridge.loadModel(ModelManager.modelFile(this@MainActivity).absolutePath)
                 withContext(Dispatchers.Main) {
                     progressBar.visibility = View.GONE
-                    if (ok) { modelReady = true; statusLine.text = "Hazır — çeviri cihazınızda, çevrimdışı çalışır." }
-                    else statusLine.text = "Model yüklenemedi. Uygulamayı yeniden başlatın."
+                    statusLine.text = "Model yükleniyor (bellek: %d token bağlam, %d iş parçacığı)…".format(nCtx, nThreads)
+                }
+                // Çökme bayrağı: native çağrıdan önce yaz
+                prefs.edit().putString("load_state", "loading").commit()
+                var ok = false
+                try {
+                    ok = LlamaBridge.loadModel(ModelManager.modelFile(this@MainActivity).absolutePath, nCtx, nThreads)
+                } catch (t: Throwable) {
+                    prefs.edit().putString("load_state", "error").commit()
+                    withContext(Dispatchers.Main) { showModelError("Model yüklenemedi: " + (t.message ?: t.toString())) }
+                    return@launch
+                }
+                if (ok) {
+                    prefs.edit().remove("load_state").commit()
+                    withContext(Dispatchers.Main) {
+                        modelReady = true
+                        statusLine.text = (memWarn?.plus("\n") ?: "") + "Hazır — çeviri cihazınızda, çevrimdışı çalışır."
+                    }
+                } else {
+                    prefs.edit().putString("load_state", "error").commit()
+                    val err = try { LlamaBridge.getLastError() } catch (t: Throwable) { "" }
+                    withContext(Dispatchers.Main) {
+                        showModelError("Model yüklenemedi." + (if (err.isNotBlank()) "\n\nDetay:\n" + err.takeLast(800) else ""))
+                    }
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {
                     progressBar.visibility = View.GONE
-                    statusLine.text = e.message ?: "Model hazırlanamadı."
+                    showModelError(e.message ?: "Model hazırlanamadı.")
                 }
             }
         }
+    }
+
+    private fun showModelError(msg: String) {
+        progressBar.visibility = View.GONE
+        statusLine.text = ""
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL; background = card()
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(12) }
+        }
+        box.addView(TextView(this).apply {
+            text = "Model açılamadı"; textSize = 17f; setTextColor(Color.parseColor("#D93025"))
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+        })
+        box.addView(TextView(this).apply {
+            text = msg; textSize = 13f; setTextColor(textColor())
+            setPadding(0, dp(8), 0, dp(8)); setTextIsSelectable(true)
+        })
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        row.addView(actionButton("↻", "Tekrar dene") {
+            (root.findViewWithTag<View>("errorBox"))?.let { root.removeView(it) }
+            loadPrefs().edit().remove("load_state").commit()
+            startModelLoad()
+        })
+        row.addView(actionButton("🗑", "Modeli sıfırla") {
+            loadPrefs().edit().remove("load_state").commit()
+            ModelManager.modelFile(this).delete()
+            (root.findViewWithTag<View>("errorBox"))?.let { root.removeView(it) }
+            startModelLoad()
+        })
+        box.addView(row)
+        box.tag = "errorBox"
+        root.addView(box, 2)
     }
 
     private fun scheduleTranslate() {
